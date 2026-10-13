@@ -1,28 +1,155 @@
 <?php
+
 namespace App\Http\Controllers;
-use App\Models\Booking; use App\Models\BusinessClosure; use App\Models\BusinessHour; use App\Models\BusinessDateOverride; use App\Models\Service; use Carbon\Carbon; use Illuminate\Http\JsonResponse; use Illuminate\Http\RedirectResponse; use Illuminate\Http\Request; use Illuminate\Support\Facades\DB; use Illuminate\Support\Str; use App\Services\BookingNotificationService; use Illuminate\Validation\ValidationException; use Illuminate\View\View;
+
+use App\Models\Booking;
+use App\Models\BusinessClosure;
+use App\Models\BusinessHour;
+use App\Models\BusinessDateOverride;
+use App\Models\Service;
+use App\Models\TravelZone;
+use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use App\Services\BookingNotificationService;
+use Illuminate\Validation\ValidationException;
+use Illuminate\View\View;
+
 class BookingController extends Controller
 {
- public function create(): View { $services=Service::query()->where('is_active',true)->orderBy('sort_order')->get(); return view('booking.create',compact('services')); }
- public function slots(Request $request): JsonResponse { $v=$request->validate(['service_id'=>['required','integer','exists:services,id'],'date'=>['required','date','after_or_equal:today'],'mode'=>['required','in:salon,home']]); $service=Service::findOrFail($v['service_id']); if(!$service->is_active || ($v['mode']==='home'&&!$service->at_home)||($v['mode']==='salon'&&!$service->at_salon)) return response()->json(['slots'=>[]]); return response()->json(['slots'=>$this->availableSlots($service,$v['date'],$v['mode'])]); }
- public function monthAvailability(Request $request): JsonResponse { $v=$request->validate(['service_id'=>['required','integer','exists:services,id'],'month'=>['required','date_format:Y-m'],'mode'=>['required','in:salon,home']]); $service=Service::findOrFail($v['service_id']); if(!$service->is_active || ($v['mode']==='home'&&!$service->at_home)||($v['mode']==='salon'&&!$service->at_salon)) return response()->json(['available_dates'=>[]]); $start=Carbon::createFromFormat('Y-m-d',$v['month'].'-01')->startOfMonth(); $end=$start->copy()->endOfMonth(); $available=[]; for($day=$start->copy();$day->lte($end);$day->addDay()){ $date=$day->toDateString(); if($date>=today()->toDateString() && $this->availableSlots($service,$date,$v['mode'])!==[]) $available[]=$date; } return response()->json(['month'=>$v['month'],'available_dates'=>$available]); }
- public function store(Request $request, BookingNotificationService $notifications): RedirectResponse {
-  $v=$request->validate(['service_id'=>['required','integer','exists:services,id'],'service_mode'=>['required','in:salon,home'],'appointment_date'=>['required','date','after_or_equal:today'],'appointment_time'=>['required','date_format:H:i'],'customer_name'=>['required','string','max:120'],'customer_email'=>['required','email','max:190'],'customer_language'=>['nullable','in:de,fr,en'],'customer_phone'=>['required','string','max:40'],'address_line'=>['required_if:service_mode,home','nullable','string','max:190'],'postal_code'=>['required_if:service_mode,home','nullable','string','max:20'],'city'=>['required_if:service_mode,home','nullable','string','max:100'],'address_note'=>['nullable','string','max:500'],'customer_note'=>['nullable','string','max:1000'],'privacy_consent'=>['accepted']],['service_id.required'=>'Veuillez choisir une prestation.','appointment_date.after_or_equal'=>'Choisissez une date à partir d’aujourd’hui.','privacy_consent.accepted'=>'Veuillez confirmer votre accord de confidentialité.']);
-  $v['customer_language'] = $v['customer_language'] ?? app()->getLocale() ?? 'de'; unset($v['privacy_consent']); try { $booking=DB::transaction(function() use($v){ DB::table('booking_day_locks')->insertOrIgnore(['lock_date'=>$v['appointment_date'],'created_at'=>now(),'updated_at'=>now()]); DB::table('booking_day_locks')->where('lock_date',$v['appointment_date'])->lockForUpdate()->first(); $service=Service::query()->where('is_active',true)->findOrFail($v['service_id']); if(($v['service_mode']==='salon'&&!$service->at_salon)||($v['service_mode']==='home'&&!$service->at_home)) throw ValidationException::withMessages(['service_mode'=>'Ce mode n’est pas disponible pour cette prestation.']); $slots=$this->availableSlots($service,$v['appointment_date'],$v['service_mode']); if(!in_array($v['appointment_time'],$slots,true)) throw ValidationException::withMessages(['appointment_time'=>'Ce créneau vient de devenir indisponible. Choisissez un autre horaire.']); $start=Carbon::parse($v['appointment_date'].' '.$v['appointment_time']); $end=$start->copy()->addMinutes((int)$service->duration_minutes); $fee=$v['service_mode']==='home'?(float)$service->travel_fee:0; return Booking::create([...$v,'reference'=>'JBK-'.now()->format('ymd').'-'.Str::upper(Str::random(5)),'service_price'=>(float)$service->price,'travel_fee'=>$fee,'total_price'=>(float)$service->price+$fee,'ends_at'=>$end->format('H:i:s'),'status'=>'pending']); },3); } catch(ValidationException $e){throw $e;} 
-  $notifications->newBooking($booking);
-  return redirect()->route('booking.confirmation',['booking'=>$booking->reference]);
- }
- public function confirmation(Booking $booking): View { return view('booking.confirmation',compact('booking')); }
- private function availableSlots(Service $service,string $date,string $mode): array
- {
-  $day=Carbon::parse($date); if($day->isPast() && !$day->isToday()) return []; if(BusinessClosure::whereDate('closure_date',$date)->exists()) return [];
-  // Disponibilité uniquement sur les dates explicitement ouvertes dans le calendrier admin.
-  $override=BusinessDateOverride::with('breaks')->whereDate('override_date',$date)->first();
-  if(!$override || !$override->is_open) return [];
-  $open=substr((string)$override->open_time,0,5);$close=substr((string)$override->close_time,0,5);
-  $breaks=$override->breaks->map(fn($break)=>[substr((string)$break->start_time,0,5),substr((string)$break->end_time,0,5)])->filter(fn($break)=>$break[0] && $break[1] && $break[1]>$break[0])->values()->all();
-  if(!$open||!$close||$close<=$open)return [];
-  $duration=max(15,(int)$service->duration_minutes);$bookings=Booking::with('service')->whereDate('appointment_date',$date)->whereIn('status',['pending','confirmed'])->get();$slots=[];$cursor=Carbon::parse($date.' '.$open);$closing=Carbon::parse($date.' '.$close);$now=now();
-  while($cursor->copy()->addMinutes($duration)->lte($closing)){$end=$cursor->copy()->addMinutes($duration);if($day->isToday()&&$cursor->lte($now->copy()->addMinutes(30))){$cursor->addMinutes(30);continue;}$inBreak=false;foreach($breaks as [$bs,$be])if($cursor->lt(Carbon::parse($date.' '.$be))&&$end->gt(Carbon::parse($date.' '.$bs))){$inBreak=true;break;}$busy=false;$buffer=max(0,(int)config('jorsid.home_travel_buffer_minutes',30));$candidateStart=$mode==='home'?$cursor->copy()->subMinutes($buffer):$cursor->copy();$candidateEnd=$mode==='home'?$end->copy()->addMinutes($buffer):$end->copy();foreach($bookings as $b){$bs=Carbon::parse($date.' '.substr($b->appointment_time,0,5));$be=$b->ends_at?Carbon::parse($date.' '.substr($b->ends_at,0,5)):$bs->copy()->addMinutes((int)($b->service?->duration_minutes??60));if($b->service_mode==='home'){$bs->subMinutes($buffer);$be->addMinutes($buffer);}if($candidateStart->lt($be)&&$candidateEnd->gt($bs)){$busy=true;break;}}if(!$inBreak&&!$busy)$slots[]=$cursor->format('H:i');$cursor->addMinutes(30);}return $slots;
- }
+    public function create(): View
+    {
+        $services = Service::query()->where('is_active', true)->orderBy('sort_order')->get();
+        return view('booking.create', compact('services'));
+    }
+    public function slots(Request $request): JsonResponse
+    {
+        $v = $request->validate(['service_id' => ['required', 'integer', 'exists:services,id'], 'date' => ['required', 'date', 'after_or_equal:today'], 'mode' => ['required', 'in:salon,home']]);
+        $service = Service::findOrFail($v['service_id']);
+        if (!$service->is_active || ($v['mode'] === 'home' && !$service->at_home) || ($v['mode'] === 'salon' && !$service->at_salon)) return response()->json(['slots' => []]);
+        return response()->json(['slots' => $this->availableSlots($service, $v['date'], $v['mode'])]);
+    }
+    public function travelQuote(Request $request): JsonResponse
+    {
+        $v = $request->validate(['service_id' => ['required', 'integer', 'exists:services,id'], 'city' => ['nullable', 'string', 'max:100'], 'postal_code' => ['nullable', 'string', 'max:20']]);
+        $service = Service::findOrFail($v['service_id']);
+        $city = mb_strtolower(trim((string)($v['city'] ?? '')));
+        $postal = preg_replace('/\s+/', '', (string)($v['postal_code'] ?? ''));
+        $zones = TravelZone::query()->where('is_active', true)->where(function ($q) use ($service) {
+            $q->whereNull('service_id')->orWhere('service_id', $service->id);
+        })
+            ->where(function ($q) use ($city) {
+                $q->whereNull('city');
+                if ($city !== '') $q->orWhereRaw('LOWER(city) = ?', [$city]);
+            })
+            ->where(function ($q) use ($postal) {
+                $q->whereNull('postal_code_prefix');
+                if ($postal !== '') $q->orWhereRaw('LEFT(?, LENGTH(postal_code_prefix)) = postal_code_prefix', [$postal]);
+            })
+            ->orderByRaw('CASE WHEN service_id IS NULL THEN 1 ELSE 0 END')
+            ->orderByRaw('CASE WHEN city IS NULL THEN 1 ELSE 0 END')
+            ->orderByRaw('CASE WHEN postal_code_prefix IS NULL THEN 1 ELSE 0 END')->first();
+        return response()->json(['fee' => $zones ? (float)$zones->fee : (float)$service->travel_fee, 'zone' => $zones?->name, 'matched' => (bool)$zones, 'needs_confirmation' => !$zones]);
+    }
+    public function monthAvailability(Request $request): JsonResponse
+    {
+        $v = $request->validate(['service_id' => ['required', 'integer', 'exists:services,id'], 'month' => ['required', 'date_format:Y-m'], 'mode' => ['required', 'in:salon,home']]);
+        $service = Service::findOrFail($v['service_id']);
+        if (!$service->is_active || ($v['mode'] === 'home' && !$service->at_home) || ($v['mode'] === 'salon' && !$service->at_salon)) return response()->json(['available_dates' => []]);
+        $start = Carbon::createFromFormat('Y-m-d', $v['month'] . '-01', config('app.timezone'))->startOfMonth();
+        $end = $start->copy()->endOfMonth();
+        $available = [];
+        for ($day = $start->copy(); $day->lte($end); $day->addDay()) {
+            $date = $day->toDateString();
+            if ($date >= Carbon::today(config('app.timezone'))->toDateString() && $this->availableSlots($service, $date, $v['mode']) !== []) $available[] = $date;
+        }
+        return response()->json(['month' => $v['month'], 'available_dates' => $available]);
+    }
+    public function store(Request $request, BookingNotificationService $notifications): RedirectResponse
+    {
+        $v = $request->validate(['service_id' => ['required', 'integer', 'exists:services,id'], 'service_mode' => ['required', 'in:salon,home'], 'appointment_date' => ['required', 'date', 'after_or_equal:today'], 'appointment_time' => ['required', 'date_format:H:i'], 'customer_name' => ['required', 'string', 'max:120'], 'customer_email' => ['required', 'email', 'max:190'], 'customer_language' => ['nullable', 'in:de,fr,en'], 'customer_phone' => ['required', 'string', 'max:40'], 'address_line' => ['required_if:service_mode,home', 'nullable', 'string', 'max:190'], 'postal_code' => ['required_if:service_mode,home', 'nullable', 'string', 'max:20'], 'city' => ['required_if:service_mode,home', 'nullable', 'string', 'max:100'], 'address_note' => ['nullable', 'string', 'max:500'], 'customer_note' => ['nullable', 'string', 'max:1000'], 'privacy_consent' => ['accepted']], ['service_id.required' => 'Veuillez choisir une prestation.', 'appointment_date.after_or_equal' => 'Choisissez une date à partir d’aujourd’hui.', 'privacy_consent.accepted' => 'Veuillez confirmer votre accord de confidentialité.']);
+        $v['customer_language'] = $v['customer_language'] ?? app()->getLocale() ?? 'de';
+        unset($v['privacy_consent']);
+        try {
+            $booking = DB::transaction(function () use ($v) {
+                DB::table('booking_day_locks')->insertOrIgnore(['lock_date' => $v['appointment_date'], 'created_at' => now(), 'updated_at' => now()]);
+                DB::table('booking_day_locks')->where('lock_date', $v['appointment_date'])->lockForUpdate()->first();
+                $service = Service::query()->where('is_active', true)->findOrFail($v['service_id']);
+                if (($v['service_mode'] === 'salon' && !$service->at_salon) || ($v['service_mode'] === 'home' && !$service->at_home)) throw ValidationException::withMessages(['service_mode' => 'Ce mode n’est pas disponible pour cette prestation.']);
+                $slots = $this->availableSlots($service, $v['appointment_date'], $v['service_mode']);
+                if (!in_array($v['appointment_time'], $slots, true)) throw ValidationException::withMessages(['appointment_time' => 'Ce créneau vient de devenir indisponible. Choisissez un autre horaire.']);
+                $start = Carbon::parse($v['appointment_date'] . ' ' . $v['appointment_time']);
+                $end = $start->copy()->addMinutes((int)$service->duration_minutes);
+                $fee = 0;
+                if ($v['service_mode'] === 'home') {
+                    $city = mb_strtolower(trim((string)($v['city'] ?? '')));
+                    $postal = preg_replace('/\s+/', '', (string)($v['postal_code'] ?? ''));
+                    $zone = TravelZone::query()->where('is_active', true)->where(fn($q) => $q->whereNull('service_id')->orWhere('service_id', $service->id))->where(fn($q) => $q->whereNull('city')->orWhereRaw('LOWER(city) = ?', [$city]))->where(fn($q) => $q->whereNull('postal_code_prefix')->orWhereRaw('LEFT(?, LENGTH(postal_code_prefix)) = postal_code_prefix', [$postal]))->orderByRaw('CASE WHEN service_id IS NULL THEN 1 ELSE 0 END')->orderByRaw('CASE WHEN city IS NULL THEN 1 ELSE 0 END')->orderByRaw('CASE WHEN postal_code_prefix IS NULL THEN 1 ELSE 0 END')->first();
+                    $fee = $zone ? (float)$zone->fee : (float)$service->travel_fee;
+                }
+                return Booking::create([...$v, 'reference' => 'JBK-' . now()->format('ymd') . '-' . Str::upper(Str::random(5)), 'service_price' => (float)$service->price, 'travel_fee' => $fee, 'total_price' => (float)$service->price + $fee, 'ends_at' => $end->format('H:i:s'), 'status' => 'pending']);
+            }, 3);
+        } catch (ValidationException $e) {
+            throw $e;
+        }
+        $notifications->newBooking($booking);
+        return redirect()->route('booking.confirmation', ['booking' => $booking->reference]);
+    }
+    public function confirmation(Booking $booking): View
+    {
+        return view('booking.confirmation', compact('booking'));
+    }
+    private function availableSlots(Service $service, string $date, string $mode): array
+    {
+        $day = Carbon::parse($date, config('app.timezone'));
+        if ($day->toDateString() < Carbon::today(config('app.timezone'))->toDateString()) return [];
+        if (BusinessClosure::whereDate('closure_date', $date)->exists()) return [];
+        // Disponibilité uniquement sur les dates explicitement ouvertes dans le calendrier admin.
+        $override = BusinessDateOverride::with('breaks')->whereDate('override_date', $date)->first();
+        if (!$override || !$override->is_open) return [];
+        $open = substr((string)$override->open_time, 0, 5);
+        $close = substr((string)$override->close_time, 0, 5);
+        $breaks = $override->breaks->map(fn($break) => [substr((string)$break->start_time, 0, 5), substr((string)$break->end_time, 0, 5)])->filter(fn($break) => $break[0] && $break[1] && $break[1] > $break[0])->values()->all();
+        if (!$open || !$close || $close <= $open) return [];
+        $duration = max(15, (int)$service->duration_minutes);
+        $bookings = Booking::with('service')->whereDate('appointment_date', $date)->whereIn('status', ['pending', 'confirmed'])->get();
+        $slots = [];
+        $cursor = Carbon::parse($date . ' ' . $open);
+        $closing = Carbon::parse($date . ' ' . $close);
+        $now = now(config('app.timezone'));
+        while ($cursor->copy()->addMinutes($duration)->lte($closing)) {
+            $end = $cursor->copy()->addMinutes($duration);
+            if ($day->isToday() && $cursor->lte($now->copy()->addMinutes(30))) {
+                $cursor->addMinutes(30);
+                continue;
+            }
+            $inBreak = false;
+            foreach ($breaks as [$bs, $be]) if ($cursor->lt(Carbon::parse($date . ' ' . $be)) && $end->gt(Carbon::parse($date . ' ' . $bs))) {
+                $inBreak = true;
+                break;
+            }
+            $busy = false;
+            $buffer = max(0, (int)config('jorsid.home_travel_buffer_minutes', 30));
+            $candidateStart = $mode === 'home' ? $cursor->copy()->subMinutes($buffer) : $cursor->copy();
+            $candidateEnd = $mode === 'home' ? $end->copy()->addMinutes($buffer) : $end->copy();
+            foreach ($bookings as $b) {
+                $bs = Carbon::parse($date . ' ' . substr($b->appointment_time, 0, 5));
+                $be = $b->ends_at ? Carbon::parse($date . ' ' . substr($b->ends_at, 0, 5)) : $bs->copy()->addMinutes((int)($b->service?->duration_minutes ?? 60));
+                if ($b->service_mode === 'home') {
+                    $bs->subMinutes($buffer);
+                    $be->addMinutes($buffer);
+                }
+                if ($candidateStart->lt($be) && $candidateEnd->gt($bs)) {
+                    $busy = true;
+                    break;
+                }
+            }
+            if (!$inBreak && !$busy) $slots[] = $cursor->format('H:i');
+            $cursor->addMinutes(30);
+        }
+        return $slots;
+    }
 }

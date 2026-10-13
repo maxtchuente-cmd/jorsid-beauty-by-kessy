@@ -8,6 +8,7 @@
 <a href="{{ route('admin.categories.index') }}" title="Catégories" class="{{ request()->routeIs('admin.categories.*')?'active':'' }}"><span class="nav-icon">▤</span><span>Catégories</span></a>
 <a href="{{ route('admin.services.index') }}" title="Prestations" class="{{ request()->routeIs('admin.services.*')?'active':'' }}"><span class="nav-icon">✧</span><span>Prestations & coiffures</span></a>
 <a href="{{ route('admin.hours.index') }}" title="Horaires et congés" class="{{ request()->routeIs('admin.hours.*')?'active':'' }}"><span class="nav-icon">◷</span><span>Agenda & disponibilités</span></a>
+<a href="{{ route('admin.travel-zones.index') }}" title="Zones de déplacement" class="{{ request()->routeIs('admin.travel-zones.*')?'active':'' }}"><span class="nav-icon">⌁</span><span>Tarifs de déplacement</span></a>
 <a href="{{ route('admin.gallery.index') }}" title="Galerie photos" class="{{ request()->routeIs('admin.gallery.*')?'active':'' }}"><span class="nav-icon">▧</span><span>Galerie photos</span></a>
 <a href="{{ route('admin.mail-settings.index') }}" title="E-mails et SMTP" class="{{ request()->routeIs('admin.mail-settings.*')?'active':'' }}"><span class="nav-icon">✉</span><span>E-mails et SMTP</span></a>
 <a href="{{ route('admin.testimonials.index') }}" title="Témoignages" class="{{ request()->routeIs('admin.testimonials.*')?'active':'' }}"><span class="nav-icon">♡</span><span>Témoignages</span></a>

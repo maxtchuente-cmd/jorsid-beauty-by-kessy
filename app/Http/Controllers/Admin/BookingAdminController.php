@@ -62,14 +62,21 @@ class BookingAdminController extends Controller
         $previousTime = substr($booking->appointment_time, 0, 5);
         $targetDate = $hasDate ? $v['appointment_date'] : $previousDate;
         $targetTime = $hasTime ? $v['appointment_time'] : $previousTime;
-        if ($hasDate || $v['status'] === 'confirmed') $this->assertSlotAvailable($booking, $targetDate, $targetTime);
         $v['appointment_date'] = $targetDate;
         $v['appointment_time'] = $targetTime;
-        $duration = max(15, (int) ($booking->service?->duration_minutes ?? 60));
-        $v['ends_at'] = Carbon::parse($targetDate.' '.$targetTime)->addMinutes($duration)->format('H:i:s');
-        $v['confirmed_at'] = $v['status'] === 'confirmed' ? ($booking->confirmed_at ?? now()) : $booking->confirmed_at;
-        $v['cancelled_at'] = in_array($v['status'], ['cancelled', 'rejected'], true) ? now() : null;
-        $booking->update($v);
+        DB::transaction(function () use ($booking, $v, $targetDate, $targetTime) {
+            DB::table('booking_day_locks')->insertOrIgnore(['lock_date' => $targetDate, 'created_at' => now(), 'updated_at' => now()]);
+            DB::table('booking_day_locks')->where('lock_date', $targetDate)->lockForUpdate()->first();
+            $booking->refresh();
+            if ($v['appointment_date'] !== $booking->appointment_date->format('Y-m-d') || $v['appointment_time'] !== substr($booking->appointment_time, 0, 5) || $v['status'] === 'confirmed') {
+                $this->assertSlotAvailable($booking, $targetDate, $targetTime);
+            }
+            $duration = max(15, (int) ($booking->service?->duration_minutes ?? 60));
+            $v['ends_at'] = Carbon::parse($targetDate.' '.$targetTime, config('app.timezone'))->addMinutes($duration)->format('H:i:s');
+            $v['confirmed_at'] = $v['status'] === 'confirmed' ? ($booking->confirmed_at ?? now()) : $booking->confirmed_at;
+            $v['cancelled_at'] = in_array($v['status'], ['cancelled', 'rejected'], true) ? now() : null;
+            $booking->update($v);
+        }, 3);
         if ($previous !== $booking->status || $previousDate !== $targetDate || $previousTime !== $targetTime) {
             $notifications->statusChanged($booking, $previous);
         }
@@ -80,29 +87,28 @@ class BookingAdminController extends Controller
     {
         $service = $booking->service;
         if (!$service) throw ValidationException::withMessages(['status' => 'La prestation associée à ce rendez-vous est introuvable.']);
-        if (BusinessClosure::whereDate('closure_date', $date)->exists()) throw ValidationException::withMessages(['appointment_date' => 'Cette journée est fermée.']);
-        $day = Carbon::parse($date);
-        $override = BusinessDateOverride::with('breaks')->whereDate('override_date', $date)->first();
-        $hours = BusinessHour::where('weekday', $day->dayOfWeekIso)->first();
-        if ($override) {
-            if (!$override->is_open) throw ValidationException::withMessages(['appointment_date' => 'Cette journée est fermée.']);
-            $open = substr((string) $override->open_time, 0, 5); $close = substr((string) $override->close_time, 0, 5);
-            $breaks = $override->breaks->map(fn($b) => [substr($b->start_time, 0, 5), substr($b->end_time, 0, 5)])->all();
-        } else {
-            if ($hours ? !$hours->is_open : $day->isSunday()) throw ValidationException::withMessages(['appointment_date' => 'Aucun horaire de travail n’est prévu pour cette date.']);
-            $open = $hours ? substr($hours->open_time, 0, 5) : '09:00'; $close = $hours ? substr($hours->close_time, 0, 5) : '18:00';
-            $breaks = ($hours && $hours->break_start && $hours->break_end) ? [[substr($hours->break_start, 0, 5), substr($hours->break_end, 0, 5)]] : [];
+        if (($booking->service_mode === 'salon' && !$service->at_salon) || ($booking->service_mode === 'home' && !$service->at_home)) {
+            throw ValidationException::withMessages(['status' => 'Cette prestation n’est pas disponible dans le mode choisi.']);
         }
-        $start = Carbon::parse($date.' '.$time); $end = $start->copy()->addMinutes(max(15, (int) $service->duration_minutes));
-        if ($time < $open || $end->format('H:i') > $close) throw ValidationException::withMessages(['appointment_time' => 'La prestation complète doit tenir dans les horaires de travail.']);
-        foreach ($breaks as [$breakStart, $breakEnd]) if ($start->format('H:i') < $breakEnd && $end->format('H:i') > $breakStart) throw ValidationException::withMessages(['appointment_time' => 'Le créneau chevauche une pause.']);
-        $buffer = max(0, (int) config('jorsid.home_travel_buffer_minutes', 30));
+        if (BusinessClosure::whereDate('closure_date', $date)->exists()) throw ValidationException::withMessages(['appointment_date' => 'Cette journée est fermée.']);
+        $override = BusinessDateOverride::with('breaks')->whereDate('override_date', $date)->first();
+        if (!$override || !$override->is_open) throw ValidationException::withMessages(['appointment_date' => 'Cette date n’est pas ouverte dans le calendrier public. Définissez d’abord ses horaires dans l’agenda.']);
+        $open = substr((string)$override->open_time, 0, 5); $close = substr((string)$override->close_time, 0, 5);
+        $start = Carbon::parse($date.' '.$time, config('app.timezone'));
+        if ($date === Carbon::today(config('app.timezone'))->toDateString() && $start->lte(now(config('app.timezone'))->addMinutes(30))) throw ValidationException::withMessages(['appointment_time' => 'Ce créneau est trop proche ou déjà passé.']);
+        $end = $start->copy()->addMinutes(max(15, (int)$service->duration_minutes));
+        if (!$open || !$close || $time < $open || $end->format('H:i') > $close) throw ValidationException::withMessages(['appointment_time' => 'La prestation complète doit tenir dans les horaires de travail.']);
+        foreach ($override->breaks as $break) {
+            $breakStart = substr((string)$break->start_time, 0, 5); $breakEnd = substr((string)$break->end_time, 0, 5);
+            if ($start->format('H:i') < $breakEnd && $end->format('H:i') > $breakStart) throw ValidationException::withMessages(['appointment_time' => 'Le créneau chevauche une pause.']);
+        }
+        $buffer = max(0, (int)config('jorsid.home_travel_buffer_minutes', 30));
         $candidateStart = $booking->service_mode === 'home' ? $start->copy()->subMinutes($buffer) : $start->copy();
         $candidateEnd = $booking->service_mode === 'home' ? $end->copy()->addMinutes($buffer) : $end->copy();
         $others = Booking::with('service')->where('id', '!=', $booking->id)->whereDate('appointment_date', $date)->whereIn('status', ['pending', 'confirmed'])->get();
         foreach ($others as $other) {
-            $otherStart = Carbon::parse($date.' '.substr($other->appointment_time, 0, 5));
-            $otherEnd = $other->ends_at ? Carbon::parse($date.' '.substr($other->ends_at, 0, 5)) : $otherStart->copy()->addMinutes((int) ($other->service?->duration_minutes ?? 60));
+            $otherStart = Carbon::parse($date.' '.substr($other->appointment_time, 0, 5), config('app.timezone'));
+            $otherEnd = $other->ends_at ? Carbon::parse($date.' '.substr($other->ends_at, 0, 5), config('app.timezone')) : $otherStart->copy()->addMinutes((int)($other->service?->duration_minutes ?? 60));
             if ($other->service_mode === 'home') { $otherStart->subMinutes($buffer); $otherEnd->addMinutes($buffer); }
             if ($candidateStart->lt($otherEnd) && $candidateEnd->gt($otherStart)) throw ValidationException::withMessages(['appointment_time' => 'Ce créneau chevauche un autre rendez-vous. Choisissez une autre date ou une autre heure.']);
         }
