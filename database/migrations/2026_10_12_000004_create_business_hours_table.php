@@ -1,0 +1,4 @@
+<?php
+use Illuminate\Database\Migrations\Migration; use Illuminate\Database\Schema\Blueprint; use Illuminate\Support\Facades\Schema;
+return new class extends Migration { public function up(): void { if (!Schema::hasTable('business_hours')) Schema::create('business_hours', function(Blueprint $t){$t->id();$t->unsignedTinyInteger('weekday')->unique();$t->boolean('is_open')->default(true);$t->time('open_time')->default('09:00:00');$t->time('close_time')->default('18:00:00');$t->time('break_start')->nullable();$t->time('break_end')->nullable();$t->timestamps();}); if (!Schema::hasTable('business_closures')) Schema::create('business_closures', function(Blueprint $t){$t->id();$t->date('closure_date')->index();$t->string('label')->nullable();$t->timestamps();}); }
+ public function down(): void { Schema::dropIfExists('business_closures'); Schema::dropIfExists('business_hours'); }};

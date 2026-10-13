@@ -1,0 +1,3 @@
+<?php
+use Illuminate\Database\Migrations\Migration;use Illuminate\Database\Schema\Blueprint;use Illuminate\Support\Facades\Schema;
+return new class extends Migration{public function up():void{if(Schema::hasTable('services'))Schema::table('services',function(Blueprint $t){foreach(['name_de','name_fr','name_en','description_de','description_fr','description_en'] as $c)if(!Schema::hasColumn('services',$c))$t->string($c,200)->nullable();});}public function down():void{if(Schema::hasTable('services'))Schema::table('services',function(Blueprint $t){foreach(['name_de','name_fr','name_en','description_de','description_fr','description_en'] as $c)if(Schema::hasColumn('services',$c))$t->dropColumn($c);});}};

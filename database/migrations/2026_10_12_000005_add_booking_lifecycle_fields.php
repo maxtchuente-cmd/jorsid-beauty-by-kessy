@@ -1,0 +1,4 @@
+<?php
+use Illuminate\Database\Migrations\Migration; use Illuminate\Database\Schema\Blueprint; use Illuminate\Support\Facades\Schema;
+return new class extends Migration { public function up(): void { if (Schema::hasTable('bookings')) Schema::table('bookings', function(Blueprint $t){if(!Schema::hasColumn('bookings','ends_at'))$t->time('ends_at')->nullable()->after('appointment_time'); if(!Schema::hasColumn('bookings','admin_note'))$t->text('admin_note')->nullable(); if(!Schema::hasColumn('bookings','cancelled_at'))$t->timestamp('cancelled_at')->nullable(); if(!Schema::hasColumn('bookings','confirmed_at'))$t->timestamp('confirmed_at')->nullable();}); }
+ public function down(): void { if(Schema::hasTable('bookings')) Schema::table('bookings',function(Blueprint $t){foreach(['ends_at','admin_note','cancelled_at','confirmed_at'] as $c)if(Schema::hasColumn('bookings',$c))$t->dropColumn($c);}); }};

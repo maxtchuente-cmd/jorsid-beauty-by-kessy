@@ -1,0 +1,4 @@
+<?php
+namespace App\Console\Commands;
+use App\Models\User;use Illuminate\Console\Command;use Illuminate\Support\Facades\Hash;
+class CreateJorsidAdmin extends Command {protected $signature='jorsid:create-admin';protected $description='Crée ou promeut un compte administrateur Jorsid Beauty';public function handle():int{$name=$this->ask('Nom de l’administrateur','Kessy');$email=$this->ask('Adresse e-mail');if(!filter_var($email,FILTER_VALIDATE_EMAIL)){$this->error('Adresse e-mail invalide.');return self::FAILURE;}$password=$this->secret('Mot de passe (12 caractères minimum)');if(!$password||strlen($password)<12){$this->error('Le mot de passe doit contenir au moins 12 caractères.');return self::FAILURE;}$user=User::updateOrCreate(['email'=>$email],['name'=>$name,'password'=>Hash::make($password),'is_admin'=>true]);$this->info('Administrateur prêt : '.$user->email);return self::SUCCESS;}}
